@@ -11,27 +11,26 @@
 #include <optional>
 #include <vector>
 
-#include <boost/serialization/vector.hpp>
-
 #include "protocol.h"
 
 struct CharacterData {
-    int id;
-    std::string name;
-    std::string surname;
-    int age;
-    std::vector<uint8_t> image;
-    std::string bio;
+    int32_t id = 0;
+    std::string name{};
+    std::string surname{};
+    uint8_t age = 1;
+    std::string bio{};
 
-    template<class Archive>
-    void serialize(Archive& ar, const unsigned int version) {
-        ar & id;
-        ar & name;
-        ar & surname;
-        ar & age;
-        ar & image;
-        ar & bio;
-    }
+    // Serialize/deserialize
+    std::vector<uint8_t> serialize() const;
+    static CharacterData deserialize(const std::vector<uint8_t>& data);
+
+    // Helper methods to serialize/deserialize all characters
+    static std::vector<uint8_t> serializeVector(const std::vector<CharacterData>& characters);
+    static std::vector<CharacterData> deserializeVector(const std::vector<uint8_t>& data);
+
+    // Helper methods
+    static void write_string(std::vector<uint8_t>& buffer, const std::string& str);
+    static std::string read_string(const std::vector<uint8_t>& buffer, size_t& offset);
 };
 
 class DatabaseManager {

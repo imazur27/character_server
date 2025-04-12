@@ -1,6 +1,4 @@
 #include "session_manager.h"
-#include <boost/archive/binary_iarchive.hpp>
-#include <boost/archive/binary_oarchive.hpp>
 #include <sstream>
 #include <iostream>
 
@@ -80,32 +78,14 @@ void SessionManager::Session::start() {
             throw std::runtime_error("Warning: Keep-alive failed: " + ec.message());
         }
 
-//        // Platform-specific timeout settings
-//#ifdef _WIN32
-//        // Windows timeout settings (milliseconds)
-//        DWORD timeout = Protocol::READ_TIMEOUT;
-//        if (setsockopt(m_socket.native_handle(), SOL_SOCKET, SO_RCVTIMEO,
-//                       reinterpret_cast<const char*>(&timeout), sizeof(timeout)) == SOCKET_ERROR) {
-//            throw std::runtime_error("Failed to set Windows receive timeout");
-//        }
-//#else
-//        // Linux/Unix timeout settings
-//        struct timeval tv;
-//        tv.tv_sec = Protocol::READ_TIMEOUT / 1000;
-//        tv.tv_usec = (Protocol::READ_TIMEOUT % 1000) * 1000;
-//        if (setsockopt(m_socket.native_handle(), SOL_SOCKET, SO_RCVTIMEO,
-//                       &tv, sizeof(tv)) != 0) {
-//            throw std::runtime_error("Failed to set Unix receive timeout");
-//        }
-//#endif
-
         // Start reading
         readHeader();
 
     } catch (const std::exception& e) {
         std::cerr << "Session construction failed: " << e.what() << std::endl;
         close();
-        throw; // Re-throw to prevent invalid session from being used
+        // Re-throw to prevent incorrect session from being used by anybody
+        throw;
     }
 }
 
@@ -117,7 +97,8 @@ void SessionManager::Session::readHeader() {
             if (!ec) self->m_socket.cancel();
         });
 
-    m_readBuffer.resize(1); // Command byte
+    // Command byte
+    m_readBuffer.resize(1);
 
     boost::asio::async_read(m_socket,
         boost::asio::buffer(m_readBuffer),
@@ -127,6 +108,7 @@ void SessionManager::Session::readHeader() {
                 self->close();
                 return;
             }
+            // get the command byte and read the rest of message
             self->m_currentCommand = self->m_readBuffer[0];
             self->readBody();
         });
@@ -142,10 +124,10 @@ void SessionManager::Session::readBody() {
             if (!ec) self->m_socket.cancel();
         });
 
-    // Read until newline ('\n' as separator) using the member buffer
+    // Read until message delimiter
     boost::asio::async_read_until(m_socket,
                                   boost::asio::dynamic_buffer(m_readBuffer),  // Create temporary dynamic buffer
-                                  '\n',
+                                  Protocol::MESSAGE_DELIMITER,
                                   [self = shared_from_this()](const boost::system::error_code& ec, size_t bytes_transferred) {
         self->m_timeoutTimer.cancel();
         if (ec) {
@@ -155,150 +137,135 @@ void SessionManager::Session::readBody() {
             return;
         }
 
-        // Extract the complete message (excluding delimiter)
-        std::string message(self->m_readBuffer.begin(),
-                            self->m_readBuffer.begin() + bytes_transferred);
+        // Check that we actually found the delimiter
+        auto delim_it = std::search(
+                    self->m_readBuffer.begin(), self->m_readBuffer.end(),
+                    Protocol::MESSAGE_DELIMITER.begin(), Protocol::MESSAGE_DELIMITER.end()
+                    );
 
-        // Remove processed data from buffer
-        self->m_readBuffer.erase(self->m_readBuffer.begin(),
-                                 self->m_readBuffer.begin() + bytes_transferred);
+        // No delimiter, tcp framed the message, so read further
+        if (delim_it == self->m_readBuffer.end()) {
+            self->readBody();
+            return;
+        }
+
+        // Extract message (excluding CRLF)
+        std::vector<uint8_t> message(self->m_readBuffer.begin(), delim_it);
+
+        // Remove processed data (including CRLF)
+        self->m_readBuffer.erase(
+                    self->m_readBuffer.begin(),
+                    self->m_readBuffer.begin() + bytes_transferred
+                    );
 
         // Process message in thread pool
         boost::asio::post(self->m_manager.m_threadPool,
-                          [self, message = std::move(message)]() {
-            self->processMessage(message);
+                          [self, message = std::move(message)]() mutable {
+            self->processMessage(std::move(message));
         });
+
+        // tcp stacks messages, so read further
+        if (!self->m_readBuffer.empty()) {
+            self->readBody();
+        }
     });
 }
 
-void SessionManager::Session::processMessage(const std::string &message) {
+void SessionManager::Session::processMessage(std::vector<uint8_t>&& message) {
     try {
-        std::istringstream iss(message);
+        std::vector<uint8_t> response;
+        size_t offset = 0;
 
         switch (m_currentCommand) {
         case Protocol::GET_ALL: {
             auto characters = DatabaseManager::getInstance().getAllCharacters();
-            std::ostringstream oss;
-            {
-                boost::archive::binary_oarchive oa(oss);
-                oa << characters;
+            response.push_back(Protocol::GET_ALL);
+
+            if (!characters.empty()) {
+                auto char_data = CharacterData::serializeVector(characters);
+                response.insert(response.end(), char_data.begin(), char_data.end());
             }
-            std::string data = oss.str();
-            std::vector<uint8_t> response;
-            response.push_back(Protocol::RESP_SUCCESS);
-            response.insert(response.end(), data.begin(), data.end());
-            sendResponse(response);
+            sendResponse(std::move(response));
             break;
         }
 
         case Protocol::GET_ONE: {
-            int id;
-            iss >> id;
+            if (message.size() < sizeof(int)) {
+                throw std::runtime_error("Invalid message size for GET_ONE");
+                return;
+            }
+            int id = 0;
+            std::memcpy(&id, message.data(), sizeof(id));
+
             if (auto character = DatabaseManager::getInstance().getCharacter(id)) {
-                std::ostringstream oss;
-                {
-                    boost::archive::binary_oarchive oa(oss);
-                    oa << *character;
-                }
-                std::string data = oss.str();
-                std::vector<uint8_t> response;
-                response.push_back(Protocol::RESP_SUCCESS);
-                response.insert(response.end(), data.begin(), data.end());
-                sendResponse(response);
+                auto charData = character->serialize();
+                response.push_back(Protocol::GET_ONE);
+                response.insert(response.end(), charData.begin(), charData.end());
+                sendResponse(std::move(response));
             } else {
-                std::vector<uint8_t> response{Protocol::RESP_ERROR};
-                sendResponse(response);
+                sendResponse({Protocol::RESP_ERROR});
             }
             break;
         }
 
         case Protocol::ADD_CHARACTER: {
-            // Deserialize character data
-            CharacterData character;
-            try {
-                std::istringstream dataStream(
-                            std::string(m_readBuffer.begin(), m_readBuffer.end()));
-                boost::archive::binary_iarchive ia(dataStream);
-                ia >> character;
-
-                // Add to database
-                if (DatabaseManager::getInstance().addCharacter(character)) {
-                    std::vector<uint8_t> response{Protocol::RESP_SUCCESS};
-                    sendResponse(response);
-                } else {
-                    throw std::runtime_error("Failed to add character");
-                }
-            } catch (const std::exception& e) {
-                std::cerr << "Add character error: " << e.what() << std::endl;
-                std::vector<uint8_t> response{Protocol::RESP_ERROR};
-                sendResponse(response);
+            CharacterData character = CharacterData::deserialize(message);
+            if (DatabaseManager::getInstance().addCharacter(character)) {
+                sendResponse({Protocol::RESP_SUCCESS});
+            } else {
+                throw std::runtime_error("Failed to add character");
             }
             break;
         }
 
         case Protocol::REMOVE_CHARACTER: {
-            // Parse character ID
-            int id;
-            iss >> id;
+            if (message.size() < sizeof(int)) {
+                throw std::runtime_error("Invalid message size for REMOVE_CHARACTER");
+            }
+            int32_t id;
+            std::memcpy(&id, message.data(), sizeof(id));
 
-            // Delete from database
             if (DatabaseManager::getInstance().deleteCharacter(id)) {
-                std::vector<uint8_t> response{Protocol::RESP_SUCCESS};
-                sendResponse(response);
+                sendResponse({Protocol::RESP_SUCCESS});
             } else {
-                std::vector<uint8_t> response{Protocol::RESP_ERROR};
-                sendResponse(response);
+                sendResponse({Protocol::RESP_ERROR});
             }
             break;
         }
 
         case Protocol::UPDATE_CHARACTER: {
-            // Parse character ID
+            if (message.size() < sizeof(int)) {
+                throw std::runtime_error("Invalid message size for UPDATE_CHARACTER");
+            }
             int id;
-            iss >> id;
+            std::memcpy(&id, message.data(), sizeof(id));
 
-            // Deserialize character data
-            CharacterData character;
-            try {
-                std::istringstream dataStream(
-                            std::string(m_readBuffer.begin(), m_readBuffer.end()));
-                boost::archive::binary_iarchive ia(dataStream);
-                ia >> character;
+            CharacterData character = CharacterData::deserialize(message);
 
-                // Update in database
-                if (DatabaseManager::getInstance().updateCharacter(id, character)) {
-                    std::vector<uint8_t> response{Protocol::RESP_SUCCESS};
-                    sendResponse(response);
-                } else {
-                    throw std::runtime_error("Failed to update character");
-                }
-            } catch (const std::exception& e) {
-                std::cerr << "Update character error: " << e.what() << std::endl;
-                std::vector<uint8_t> response{Protocol::RESP_ERROR};
-                sendResponse(response);
+            if (DatabaseManager::getInstance().updateCharacter(id, character)) {
+                sendResponse({Protocol::RESP_SUCCESS});
+            } else {
+                throw std::runtime_error("Failed to update character");
             }
             break;
         }
 
         default: {
-            // Unknown command
             std::cerr << "Unknown command received: 0x" << std::hex
                       << static_cast<int>(m_currentCommand) << std::endl;
-            std::vector<uint8_t> response{Protocol::RESP_ERROR};
-            sendResponse(response);
+            sendResponse({Protocol::RESP_ERROR});
             close();
             break;
         }
         }
     } catch (const std::exception& e) {
         std::cerr << "Processing error: " << e.what() << std::endl;
-        std::vector<uint8_t> response{Protocol::RESP_ERROR};
-        sendResponse(response);
+        sendResponse({Protocol::RESP_ERROR});
         close();
     }
 }
 
-void SessionManager::Session::sendResponse(const std::vector<uint8_t>& data) {
+void SessionManager::Session::sendResponse(std::vector<uint8_t> &&data) {
     // Set timeout
     m_timeoutTimer.expires_after(std::chrono::milliseconds(Protocol::WRITE_TIMEOUT));
     m_timeoutTimer.async_wait(
@@ -306,12 +273,15 @@ void SessionManager::Session::sendResponse(const std::vector<uint8_t>& data) {
             if (!ec) self->m_socket.cancel();
         });
 
+    data.insert(data.end(), Protocol::MESSAGE_DELIMITER.begin(), Protocol::MESSAGE_DELIMITER.end());
+
     boost::asio::async_write(m_socket,
         boost::asio::buffer(data),
         [self = shared_from_this()](const boost::system::error_code& ec, size_t) {
             self->m_timeoutTimer.cancel();
             if (!ec) {
-                self->readHeader(); // Continue processing
+                // Continue processing
+                self->readHeader();
             } else {
                 self->close();
             }

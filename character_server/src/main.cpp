@@ -18,7 +18,7 @@ int main() {
         std::signal(SIGINT, signalHandler);
         std::signal(SIGTERM, signalHandler);
 
-        if (!server.initialize(12345)) {
+        if (!server.initialize(Protocol::PORT)) {
             std::cerr << "Failed to initialize server" << std::endl;
             return 1;
         }
