@@ -30,6 +30,7 @@ set(Boost_USE_STATIC_RUNTIME OFF)
 find_package(Boost 1.67 REQUIRED COMPONENTS
     system
     thread
+    serialization
     context
     fiber
     )
@@ -162,7 +163,8 @@ target_include_directories(server PRIVATE
 target_link_libraries(server PRIVATE
     ${Boost_LIBRARIES}
     ${MYSQL_LIBRARY}
-    ${EXTRA_LIBS}  # Contains ws2_32 on Windows, pthread on Linux
+    # Contains ws2_32 on Windows, pthread on Linux
+    ${EXTRA_LIBS}
 )
 
 # Post-build steps for Windows

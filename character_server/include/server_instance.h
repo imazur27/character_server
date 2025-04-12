@@ -10,8 +10,9 @@
 #include <memory>
 #include "protocol.h"
 
-class ServerInstance
-{
+class SessionManager;
+
+class ServerInstance {
 public:
     static ServerInstance& getInstance();
 
@@ -34,6 +35,7 @@ private:
 
     boost::asio::io_context m_ioContext;
     std::unique_ptr<boost::asio::ip::tcp::acceptor> m_acceptor;
+    std::shared_ptr<SessionManager> m_sessionManager;
 
     // for one, single instance ultimately
 #ifdef _WIN32
