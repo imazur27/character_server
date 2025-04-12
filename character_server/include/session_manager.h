@@ -27,8 +27,14 @@ private:
     private:
         void readHeader();
         void readBody();
-        void processMessage(const std::string &message);
-        void sendResponse(const std::vector<uint8_t>& data);
+        /*!
+         * \brief processMessage Processes a received binary message
+         * \param message The binary message data (moved into the function)
+         * \note need to use && and move semantics, cause processing messages performingin thread pool
+         * with lambdas
+         */
+        void processMessage(std::vector<uint8_t> &&message);
+        void sendResponse(std::vector<uint8_t> &&data);
         void close();
         void handleTimeout(const boost::system::error_code& ec);
 

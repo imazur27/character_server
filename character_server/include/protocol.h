@@ -7,6 +7,7 @@
 #define PROTOCOL_H
 
 #include <cstdint>
+#include <string>
 
 namespace Protocol {
 // Command bytes
@@ -22,11 +23,21 @@ constexpr uint8_t RESP_ERROR = 0x81;
 
 // Connection limits
 constexpr size_t MAX_CONNECTIONS = 1000;
-constexpr size_t THREAD_POOL_SIZE = 16; // 2x typical core count
+// 2x typical core count
+constexpr size_t THREAD_POOL_SIZE = 16;
 
 // Timeouts (milliseconds)
-constexpr unsigned READ_TIMEOUT = 30000; // 30 seconds
-constexpr unsigned WRITE_TIMEOUT = 10000; // 10 seconds
+// 30000 seconds
+constexpr unsigned READ_TIMEOUT = 30'000'000;
+ // 10000 seconds
+constexpr unsigned WRITE_TIMEOUT = 10'000'000;
+
+// Network settings
+constexpr int PORT = 12345;
+
+// message delimiter
+constexpr std::string_view MESSAGE_DELIMITER = "\r\n";
+constexpr uint8_t MESSAGE_DELIMITER_SIZE = 2;
 }
 
 #endif // PROTOCOL_H

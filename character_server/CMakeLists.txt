@@ -30,7 +30,6 @@ set(Boost_USE_STATIC_RUNTIME OFF)
 find_package(Boost 1.67 REQUIRED COMPONENTS
     system
     thread
-    serialization
     context
     fiber
     )
