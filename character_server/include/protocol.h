@@ -23,6 +23,10 @@ constexpr uint8_t RESP_ERROR = 0x81;
 // Connection limits
 constexpr size_t MAX_CONNECTIONS = 1000;
 constexpr size_t THREAD_POOL_SIZE = 16; // 2x typical core count
+
+// Timeouts (milliseconds)
+constexpr unsigned READ_TIMEOUT = 30000; // 30 seconds
+constexpr unsigned WRITE_TIMEOUT = 10000; // 10 seconds
 }
 
 #endif // PROTOCOL_H

@@ -98,15 +98,123 @@ bool DatabaseManager::addCharacter(const CharacterData& character) {
 }
 
 bool DatabaseManager::updateCharacter(int id, const CharacterData& character) {
+    std::lock_guard<std::mutex> lock(m_dbMutex);
 
+    std::string query =
+            "UPDATE characters SET name = ?, surname = ?, age = ?, image = ?, bio = ? "
+            "WHERE id = ?";
+
+    MYSQL_STMT* stmt = mysql_stmt_init(m_connection);
+    if (!stmt) return false;
+
+    if (mysql_stmt_prepare(stmt, query.c_str(), query.length()) != 0) {
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    MYSQL_BIND bind[6]{};
+
+    // Name
+    bind[0].buffer_type = MYSQL_TYPE_STRING;
+    bind[0].buffer = (void*)character.name.c_str();
+    bind[0].buffer_length = character.name.length();
+
+    // Surname
+    bind[1].buffer_type = MYSQL_TYPE_STRING;
+    bind[1].buffer = (void*)character.surname.c_str();
+    bind[1].buffer_length = character.surname.length();
+
+    // Age
+    bind[2].buffer_type = MYSQL_TYPE_LONG;
+    bind[2].buffer = (void*)&character.age;
+    bind[2].is_unsigned = false;
+
+    // Image
+    bind[3].buffer_type = MYSQL_TYPE_BLOB;
+    bind[3].buffer = (void*)character.image.data();
+    bind[3].buffer_length = character.image.size();
+
+    // Bio
+    bind[4].buffer_type = MYSQL_TYPE_STRING;
+    bind[4].buffer = (void*)character.bio.c_str();
+    bind[4].buffer_length = character.bio.length();
+
+    // ID
+    bind[5].buffer_type = MYSQL_TYPE_LONG;
+    bind[5].buffer = (void*)&id;
+    bind[5].is_unsigned = false;
+
+    if (mysql_stmt_bind_param(stmt, bind) != 0) {
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    bool result = mysql_stmt_execute(stmt) == 0;
+    mysql_stmt_close(stmt);
+    return result;
 }
 
 bool DatabaseManager::deleteCharacter(int id) {
+    std::lock_guard<std::mutex> lock(m_dbMutex);
 
+    std::string query = "DELETE FROM characters WHERE id = ?";
+    MYSQL_STMT* stmt = mysql_stmt_init(m_connection);
+    if (!stmt) return false;
+
+    if (mysql_stmt_prepare(stmt, query.c_str(), query.length()) != 0) {
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    MYSQL_BIND bind{};
+    bind.buffer_type = MYSQL_TYPE_LONG;
+    bind.buffer = (void*)&id;
+    bind.is_unsigned = false;
+
+    if (mysql_stmt_bind_param(stmt, &bind) != 0) {
+        mysql_stmt_close(stmt);
+        return false;
+    }
+
+    bool result = mysql_stmt_execute(stmt) == 0;
+    mysql_stmt_close(stmt);
+    return result;
 }
 
 std::vector<CharacterData> DatabaseManager::getAllCharacters() {
+    std::lock_guard<std::mutex> lock(m_dbMutex);
+    std::vector<CharacterData> characters;
 
+    std::string query = "SELECT id, name, surname, age, image, bio FROM characters";
+    if (mysql_query(m_connection, query.c_str())) {
+        return characters;
+    }
+
+    MYSQL_RES* result = mysql_store_result(m_connection);
+    if (!result) {
+        return characters;
+    }
+
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(result))) {
+        CharacterData character;
+        character.id = std::stoi(row[0]);
+        character.name = row[1] ? row[1] : "";
+        character.surname = row[2] ? row[2] : "";
+        character.age = std::stoi(row[3]);
+
+        // Get image data
+        unsigned long* lengths = mysql_fetch_lengths(result);
+        if (lengths && lengths[4] > 0) {
+            character.image.assign(row[4], row[4] + lengths[4]);
+        }
+
+        character.bio = row[5] ? row[5] : "";
+        characters.push_back(character);
+    }
+
+    mysql_free_result(result);
+    return characters;
 }
 
 std::optional<CharacterData> DatabaseManager::getCharacter(int id) {
@@ -142,7 +250,8 @@ std::optional<CharacterData> DatabaseManager::getCharacter(int id) {
     // Setup result bindings
     CharacterData character;
     unsigned long image_length = 0;
-    char image_data[65535]; // Temporary buffer for image
+    // Temporary buffer for image
+    char image_data[65535];
     my_bool is_null[6] = {0};
     my_bool error[6] = {0};
 

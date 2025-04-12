@@ -6,6 +6,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include "database_manager.h"
 #include "protocol.h"
 
 class SessionManager {
@@ -32,15 +33,18 @@ private:
         void handleTimeout(const boost::system::error_code& ec);
 
         boost::asio::ip::tcp::socket m_socket;
+        boost::asio::steady_timer m_timeoutTimer;
         SessionManager& m_manager;
         std::vector<uint8_t> m_readBuffer;
         std::vector<uint8_t> m_writeBuffer;
         uint8_t m_currentCommand = 0;
     };
 
-    void handleAccept(std::shared_ptr<Session> session,
-                     boost::asio::ip::tcp::acceptor& acceptor,
-                     const boost::system::error_code& error);
+    void handleAccept(
+            std::shared_ptr<Session> session,
+            boost::asio::ip::tcp::acceptor& acceptor,
+            const boost::system::error_code& error
+            );
 
     boost::asio::io_context& m_ioContext;
     boost::asio::thread_pool m_threadPool;
