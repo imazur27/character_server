@@ -1,4 +1,6 @@
 #include "session_manager.h"
+#include <boost/archive/binary_iarchive.hpp>
+#include <boost/archive/binary_oarchive.hpp>
 #include <sstream>
 #include <iostream>
 
@@ -52,6 +54,7 @@ void SessionManager::handleAccept(std::shared_ptr<Session> session,
 SessionManager::Session::Session(boost::asio::io_context& ioContext,
                                SessionManager& manager)
     : m_socket(ioContext),
+      m_timeoutTimer(ioContext),
       m_manager(manager)
 {
 
@@ -107,11 +110,19 @@ void SessionManager::Session::start() {
 }
 
 void SessionManager::Session::readHeader() {
-    m_readBuffer.resize(1);
+    // Set timeout
+    m_timeoutTimer.expires_after(std::chrono::milliseconds(Protocol::READ_TIMEOUT));
+    m_timeoutTimer.async_wait(
+        [self = shared_from_this()](const boost::system::error_code& ec) {
+            if (!ec) self->m_socket.cancel();
+        });
+
+    m_readBuffer.resize(1); // Command byte
 
     boost::asio::async_read(m_socket,
         boost::asio::buffer(m_readBuffer),
         [self = shared_from_this()](const boost::system::error_code& ec, size_t) {
+            self->m_timeoutTimer.cancel();
             if (ec) {
                 self->close();
                 return;
@@ -124,11 +135,19 @@ void SessionManager::Session::readHeader() {
 void SessionManager::Session::readBody() {
     // Clear previous content but keep capacity
     m_readBuffer.clear();
+    // Set timeout
+    m_timeoutTimer.expires_after(std::chrono::milliseconds(Protocol::READ_TIMEOUT));
+    m_timeoutTimer.async_wait(
+        [self = shared_from_this()](const boost::system::error_code& ec) {
+            if (!ec) self->m_socket.cancel();
+        });
+
     // Read until newline ('\n' as separator) using the member buffer
     boost::asio::async_read_until(m_socket,
                                   boost::asio::dynamic_buffer(m_readBuffer),  // Create temporary dynamic buffer
                                   '\n',
                                   [self = shared_from_this()](const boost::system::error_code& ec, size_t bytes_transferred) {
+        self->m_timeoutTimer.cancel();
         if (ec) {
             if (ec != boost::asio::error::operation_aborted) {
                 self->close();
@@ -156,31 +175,108 @@ void SessionManager::Session::processMessage(const std::string &message) {
     try {
         std::istringstream iss(message);
 
-        // TODO: Get some data from db, use MySql
-
         switch (m_currentCommand) {
         case Protocol::GET_ALL: {
-
+            auto characters = DatabaseManager::getInstance().getAllCharacters();
+            std::ostringstream oss;
+            {
+                boost::archive::binary_oarchive oa(oss);
+                oa << characters;
+            }
+            std::string data = oss.str();
+            std::vector<uint8_t> response;
+            response.push_back(Protocol::RESP_SUCCESS);
+            response.insert(response.end(), data.begin(), data.end());
+            sendResponse(response);
             break;
         }
 
         case Protocol::GET_ONE: {
-
+            int id;
+            iss >> id;
+            if (auto character = DatabaseManager::getInstance().getCharacter(id)) {
+                std::ostringstream oss;
+                {
+                    boost::archive::binary_oarchive oa(oss);
+                    oa << *character;
+                }
+                std::string data = oss.str();
+                std::vector<uint8_t> response;
+                response.push_back(Protocol::RESP_SUCCESS);
+                response.insert(response.end(), data.begin(), data.end());
+                sendResponse(response);
+            } else {
+                std::vector<uint8_t> response{Protocol::RESP_ERROR};
+                sendResponse(response);
+            }
             break;
         }
 
         case Protocol::ADD_CHARACTER: {
+            // Deserialize character data
+            CharacterData character;
+            try {
+                std::istringstream dataStream(
+                            std::string(m_readBuffer.begin(), m_readBuffer.end()));
+                boost::archive::binary_iarchive ia(dataStream);
+                ia >> character;
 
+                // Add to database
+                if (DatabaseManager::getInstance().addCharacter(character)) {
+                    std::vector<uint8_t> response{Protocol::RESP_SUCCESS};
+                    sendResponse(response);
+                } else {
+                    throw std::runtime_error("Failed to add character");
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Add character error: " << e.what() << std::endl;
+                std::vector<uint8_t> response{Protocol::RESP_ERROR};
+                sendResponse(response);
+            }
             break;
         }
 
         case Protocol::REMOVE_CHARACTER: {
+            // Parse character ID
+            int id;
+            iss >> id;
 
+            // Delete from database
+            if (DatabaseManager::getInstance().deleteCharacter(id)) {
+                std::vector<uint8_t> response{Protocol::RESP_SUCCESS};
+                sendResponse(response);
+            } else {
+                std::vector<uint8_t> response{Protocol::RESP_ERROR};
+                sendResponse(response);
+            }
             break;
         }
 
         case Protocol::UPDATE_CHARACTER: {
+            // Parse character ID
+            int id;
+            iss >> id;
 
+            // Deserialize character data
+            CharacterData character;
+            try {
+                std::istringstream dataStream(
+                            std::string(m_readBuffer.begin(), m_readBuffer.end()));
+                boost::archive::binary_iarchive ia(dataStream);
+                ia >> character;
+
+                // Update in database
+                if (DatabaseManager::getInstance().updateCharacter(id, character)) {
+                    std::vector<uint8_t> response{Protocol::RESP_SUCCESS};
+                    sendResponse(response);
+                } else {
+                    throw std::runtime_error("Failed to update character");
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Update character error: " << e.what() << std::endl;
+                std::vector<uint8_t> response{Protocol::RESP_ERROR};
+                sendResponse(response);
+            }
             break;
         }
 
@@ -203,9 +299,17 @@ void SessionManager::Session::processMessage(const std::string &message) {
 }
 
 void SessionManager::Session::sendResponse(const std::vector<uint8_t>& data) {
+    // Set timeout
+    m_timeoutTimer.expires_after(std::chrono::milliseconds(Protocol::WRITE_TIMEOUT));
+    m_timeoutTimer.async_wait(
+        [self = shared_from_this()](const boost::system::error_code& ec) {
+            if (!ec) self->m_socket.cancel();
+        });
+
     boost::asio::async_write(m_socket,
         boost::asio::buffer(data),
         [self = shared_from_this()](const boost::system::error_code& ec, size_t) {
+            self->m_timeoutTimer.cancel();
             if (!ec) {
                 self->readHeader(); // Continue processing
             } else {
@@ -216,6 +320,7 @@ void SessionManager::Session::sendResponse(const std::vector<uint8_t>& data) {
 
 void SessionManager::Session::close() {
     boost::system::error_code ec;
+    m_timeoutTimer.cancel(ec);
     m_socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ec);
     m_socket.close(ec);
     --m_manager.m_activeConnections;

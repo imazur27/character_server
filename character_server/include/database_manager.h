@@ -11,6 +11,8 @@
 #include <optional>
 #include <vector>
 
+#include <boost/serialization/vector.hpp>
+
 #include "protocol.h"
 
 struct CharacterData {
@@ -20,6 +22,16 @@ struct CharacterData {
     int age;
     std::vector<uint8_t> image;
     std::string bio;
+
+    template<class Archive>
+    void serialize(Archive& ar, const unsigned int version) {
+        ar & id;
+        ar & name;
+        ar & surname;
+        ar & age;
+        ar & image;
+        ar & bio;
+    }
 };
 
 class DatabaseManager {

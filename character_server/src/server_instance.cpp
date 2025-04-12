@@ -62,10 +62,17 @@ void ServerInstance::cleanupSingleInstanceLock() {
 
 bool ServerInstance::initialize(unsigned short port) {
     try {
+        if (!DatabaseManager::getInstance().initialize("localhost", "character_user", "secure_password_123", "character_db")) {
+            return false;
+        }
 
-        // TODO: initialize acception from clients, clients may be several, so need the object pool
-        // (session for sockets) and object that manages that pool, i.e. session manager
+        m_sessionManager = std::make_shared<SessionManager>(m_ioContext);
+        m_acceptor = std::make_unique<boost::asio::ip::tcp::acceptor>(
+            m_ioContext,
+            boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), port)
+        );
 
+        m_sessionManager->startAccept(*m_acceptor);
         return true;
     } catch (const std::exception& e) {
         std::cerr << "Initialization error: " << e.what() << std::endl;
@@ -82,5 +89,8 @@ void ServerInstance::stop() {
     m_ioContext.stop();
     if (m_acceptor) {
         m_acceptor->close();
+    }
+    if (m_sessionManager) {
+        m_sessionManager->stop();
     }
 }
