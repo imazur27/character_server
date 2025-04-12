@@ -142,6 +142,7 @@ add_executable(server)
 
 target_sources(server PRIVATE
     src/main.cpp
+    src/protocol.cpp
     src/database_manager.cpp
     src/session_manager.cpp
     src/server_instance.cpp
